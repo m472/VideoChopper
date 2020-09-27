@@ -27,7 +27,7 @@ def create_model(training_data: TrainingData) -> Sequential:
     model.add(MaxPooling1D(pool_size=2))
     model.add(Flatten())
     model.add(Dense(60, activation='relu'))
-    model.add(Dense(3, activation='softmax'))
+    model.add(Dense(len(labels), activation='softmax'))
     model.compile(loss='categorical_crossentropy', optimizer='Adam', metrics=['accuracy'])
 
     x = np.stack(training_data.data)

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 from enum import Enum
 
 import cv2 as cv
@@ -13,7 +13,7 @@ class RecordingState(Enum):
     RECORDING = (0, 255, 0)
 
 
-class DataWriter:
+class DataWriter(ABC):
     @abstractmethod
     def write(self, data: np.ndarray) -> None:
         pass
@@ -23,7 +23,15 @@ class DataWriter:
         pass
 
 
-class OpenCVVideoWriter(DataWriter):
+class VideoWriter(DataWriter, ABC):
+    pass
+
+
+class PaletteWriter(DataWriter, ABC):
+    pass
+
+
+class OpenCVVideoWriter(VideoWriter):
     def __init__(self, filename: str):
         self.writer = cv.VideoWriter()
         fourcc = cv.VideoWriter_fourcc(*'LAGS')
@@ -36,7 +44,7 @@ class OpenCVVideoWriter(DataWriter):
         self.writer.release()
 
 
-class ImageWriter(DataWriter):
+class ImageWriter(VideoWriter):
     def __init__(self, filename: str):
         self.filename: str = filename
         self.frame_count: int = 0
@@ -152,74 +160,81 @@ class RecordState(State):
             return IdleState(self.count)
 
 
-def chop(input_filename, output_filename_template, p1, p2):
+def chop(input_filenames: List[str],
+         output_filename_template: str,
+         left: int,
+         top: int,
+         right: int,
+         bottom: int,
+         video_writer: VideoWriter = None,
+         palette_writer: DataWriter = None):
     """
     Args:
-        input_filename: file to open
-        output_filename_template: file to write
-        p1: top left corner of ROI
-        p2: bottom right corner of ROI
+        :param video_writer: output writer for video data, defaults to ImageWriter
+        :param palette_writer: output writer for palette data, defaults to PerFrameDataWriter
+        :param input_filenames: file to open
+        :param output_filename_template: file to write
+        :param left: left border of ROI
+        :param top: top border of ROI
+        :param right: right border of ROI
+        :param bottom: bottom border of ROI
     """
-    cap = cv.VideoCapture(input_filename)
 
-    score_hist = []
-    state: State = IdleState(count=0)
-    while cap.isOpened():
-        ret, frame = cap.read()
+    for filename in input_filenames:
+        cap = cv.VideoCapture(filename)
 
-        if not ret:
-            break
+        score_hist = []
+        state: State = IdleState(count=0)
+        while cap.isOpened():
+            ret, frame = cap.read()
 
-        original = np.copy(frame)
+            if not ret:
+                break
 
-        roi_rgb = np.array(frame[p1[1]:p2[1], p1[0]:p2[0], :])
+            original = np.copy(frame)
 
-        scaled = cv.resize(roi_rgb, (int(roi_rgb.shape[1]/10), int(roi_rgb.shape[0]/10)),
-                           interpolation=cv.INTER_NEAREST)
+            roi_rgb = np.array(frame[top:bottom, left:right, :])
 
-        z = np.float32(scaled.reshape(-1, 3))
-        criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 5, 1.0)
+            scaled = cv.resize(roi_rgb, (int(roi_rgb.shape[1]/10), int(roi_rgb.shape[0]/10)),
+                               interpolation=cv.INTER_NEAREST)
 
-        palette_shape = (5, 4, 3)
-        k = palette_shape[0] * palette_shape[1]
-        ret, label, center = cv.kmeans(z, k, None, criteria, 5,
-                                       cv.KMEANS_RANDOM_CENTERS)
-        palette = np.uint8(center)
+            z = np.float32(scaled.reshape(-1, 3))
+            criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 5, 1.0)
 
-        score = np.average(cv.cvtColor(np.reshape(palette, palette_shape), cv.COLOR_BGR2HSV)[:, :, 1])
-        score_hist.append(score)
-        if len(score_hist) > 50:
-            score_hist.pop(0)
-        avg_score = np.average(score_hist)
+            palette_shape = (5, 4, 3)
+            k = palette_shape[0] * palette_shape[1]
+            ret, label, center = cv.kmeans(z, k, None, criteria, 5,
+                                           cv.KMEANS_RANDOM_CENTERS)
+            palette = np.uint8(center)
 
-        print(avg_score)
+            score = np.average(cv.cvtColor(np.reshape(palette, palette_shape), cv.COLOR_BGR2HSV)[:, :, 1])
+            score_hist.append(score)
+            if len(score_hist) > 50:
+                score_hist.pop(0)
+            avg_score = np.average(score_hist)
 
-        state = state.run(StateRunInfo(original, palette, avg_score > 20, output_filename_template))
+            print(avg_score)
 
-        cv.rectangle(frame, p1, p2, state.is_recording.value, 3)
-        if state.is_recording != RecordingState.IDLE:
-            cv.putText(frame,
-                       str(state.count),
-                       (p1[0], p1[1] - 10),
-                       cv.FONT_HERSHEY_COMPLEX_SMALL,
-                       2,
-                       state.is_recording.value)
+            state = state.run(StateRunInfo(original, palette, avg_score > 20, output_filename_template))
 
-        cv.imshow('palette', cv.resize(np.reshape(palette, palette_shape), (500, 400),
-                                       interpolation=cv.INTER_NEAREST))
+            cv.rectangle(frame, (left, top), (right, bottom), state.is_recording.value, 3)
+            if state.is_recording != RecordingState.IDLE:
+                cv.putText(frame,
+                           str(state.count),
+                           (left, top - 10),
+                           cv.FONT_HERSHEY_COMPLEX_SMALL,
+                           2,
+                           state.is_recording.value)
 
-        cv.imshow('original', cv.resize(frame, (int(frame.shape[1]/2), int(frame.shape[0]/2))))
-        cv.imshow('roi', roi_rgb)
+            cv.imshow('palette', cv.resize(np.reshape(palette, palette_shape), (500, 400),
+                                           interpolation=cv.INTER_NEAREST))
 
-        if cv.waitKey(1) == 'q':
-            break
+            cv.imshow('original', cv.resize(frame, (int(frame.shape[1]/2), int(frame.shape[0]/2))))
+            cv.imshow('roi', roi_rgb)
 
-    cap.release()
+            if cv.waitKey(1) == 'q':
+                break
+
+        cap.release()
     cv.destroyAllWindows()
 
-
-if __name__ == "__main__":
-    import sys
-
-    roi_dim = [int(i) for i in sys.argv[2].split(',')]
-    chop(sys.argv[1], '/run/media/matz/SD 32GB/VideoChopper/out_{i}', tuple(roi_dim[:2]), tuple(roi_dim[2:]))
