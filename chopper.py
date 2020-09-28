@@ -14,6 +14,9 @@ class RecordingState(Enum):
 
 
 class DataWriter(ABC):
+    def __init__(self, filename: str):
+        self.filename: str = filename
+
     @abstractmethod
     def write(self, data: np.ndarray) -> None:
         pass
@@ -33,6 +36,7 @@ class PaletteWriter(DataWriter, ABC):
 
 class OpenCVVideoWriter(VideoWriter):
     def __init__(self, filename: str):
+        super().__init__(filename)
         self.writer = cv.VideoWriter()
         fourcc = cv.VideoWriter_fourcc(*'LAGS')
         self.writer.open(filename + '.avi', fourcc, 59.9, (1920, 1080))
@@ -46,7 +50,7 @@ class OpenCVVideoWriter(VideoWriter):
 
 class ImageWriter(VideoWriter):
     def __init__(self, filename: str):
-        self.filename: str = filename
+        super().__init__(filename + '_')
         self.frame_count: int = 0
 
     def write(self, data: np.ndarray) -> None:
@@ -57,9 +61,9 @@ class ImageWriter(VideoWriter):
         pass
 
 
-class SingleFileNumpyWriter(DataWriter):
+class SingleFileNumpyWriter(PaletteWriter):
     def __init__(self, filename):
-        self.filename: str = filename
+        super().__init__(filename)
         self.buffer: List[np.array] = []
 
     def write(self, data: np.ndarray) -> None:
@@ -67,13 +71,12 @@ class SingleFileNumpyWriter(DataWriter):
 
     def close(self) -> None:
         data = np.vstack(self.buffer)
-        print(data.shape)
         np.save(self.filename, data, allow_pickle=False)
 
 
-class PerFrameNumpyWriter(DataWriter):
+class PerFrameNumpyWriter(PaletteWriter):
     def __init__(self, filename: str):
-        self.filename: str = filename
+        super().__init__(filename)
         self.frame_count: int = 0
 
     def write(self, data: np.ndarray) -> None:
@@ -85,11 +88,14 @@ class PerFrameNumpyWriter(DataWriter):
 
 
 class StateRunInfo:
-    def __init__(self, image, palette, is_kayaker_in_image: bool, output_filename_template: str):
+    def __init__(self, image, palette, is_kayaker_in_image: bool, video_writer: VideoWriter,
+                 palette_writer: PaletteWriter):
+
         self.image: np.ndarray = image
         self.palette: np.ndarray = palette
         self.is_kayaker_in_image: bool = is_kayaker_in_image
-        self.output_filename_template: str = output_filename_template
+        self.video_writer: VideoWriter = video_writer
+        self.palette_writer: PaletteWriter = palette_writer
 
 
 class InfoRecorder:
@@ -127,7 +133,7 @@ class IdleState(State):
 
     def run(self, info: StateRunInfo) -> State:
         if info.is_kayaker_in_image:
-            return RecordState(self.count, info.output_filename_template)
+            return RecordState(self.count, info.video_writer, info.palette_writer)
         else:
             return self
 
@@ -139,13 +145,12 @@ class RecordState(State):
     def is_recording(self) -> RecordingState:
         return RecordingState.RECORDING
 
-    def __init__(self, count: int, output_filename_template: str):
+    def __init__(self, count: int, video_writer: VideoWriter, palette_writer: PaletteWriter):
         super().__init__(count)
         self.count += 1
         self.frames_without_kayaker_count = 0
 
-        self.recorder: InfoRecorder = InfoRecorder(ImageWriter(output_filename_template.format(i=self.count)),
-                                                   PerFrameNumpyWriter(output_filename_template.format(i=self.count)))
+        self.recorder: InfoRecorder = InfoRecorder(video_writer, palette_writer)
 
     def run(self, info: StateRunInfo):
         if self.frames_without_kayaker_count < self.MAX_FRAME_COUNT_WITHOUT_KAYAKER:
@@ -161,26 +166,29 @@ class RecordState(State):
 
 
 def chop(input_filenames: List[str],
-         output_filename_template: str,
          left: int,
          top: int,
          right: int,
          bottom: int,
-         video_writer: VideoWriter = None,
-         palette_writer: DataWriter = None):
+         video_writer: VideoWriter,
+         palette_writer: PaletteWriter,
+         debug: bool = false):
     """
     Args:
         :param video_writer: output writer for video data, defaults to ImageWriter
         :param palette_writer: output writer for palette data, defaults to PerFrameDataWriter
         :param input_filenames: file to open
-        :param output_filename_template: file to write
         :param left: left border of ROI
         :param top: top border of ROI
         :param right: right border of ROI
         :param bottom: bottom border of ROI
+        :param debug: True to output images and print statements for debugging
     """
 
     for filename in input_filenames:
+        if debug:
+            print(f'Input filename: {filename}')
+
         cap = cv.VideoCapture(filename)
 
         score_hist = []
@@ -213,9 +221,10 @@ def chop(input_filenames: List[str],
                 score_hist.pop(0)
             avg_score = np.average(score_hist)
 
-            print(avg_score)
+            if debug:
+                print(f'Score: {avg_score:.0f}')
 
-            state = state.run(StateRunInfo(original, palette, avg_score > 20, output_filename_template))
+            state = state.run(StateRunInfo(original, palette, avg_score > 20, video_writer, palette_writer))
 
             cv.rectangle(frame, (left, top), (right, bottom), state.is_recording.value, 3)
             if state.is_recording != RecordingState.IDLE:
@@ -226,14 +235,15 @@ def chop(input_filenames: List[str],
                            2,
                            state.is_recording.value)
 
-            cv.imshow('palette', cv.resize(np.reshape(palette, palette_shape), (500, 400),
-                                           interpolation=cv.INTER_NEAREST))
+            if debug:
+                cv.imshow('palette', cv.resize(np.reshape(palette, palette_shape), (500, 400),
+                                               interpolation=cv.INTER_NEAREST))
 
-            cv.imshow('original', cv.resize(frame, (int(frame.shape[1]/2), int(frame.shape[0]/2))))
-            cv.imshow('roi', roi_rgb)
+                cv.imshow('original', cv.resize(frame, (int(frame.shape[1]/2), int(frame.shape[0]/2))))
+                cv.imshow('roi', roi_rgb)
 
-            if cv.waitKey(1) == 'q':
-                break
+                if cv.waitKey(1) == 'q':
+                    break
 
         cap.release()
     cv.destroyAllWindows()

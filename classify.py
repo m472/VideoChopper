@@ -31,4 +31,4 @@ if __name__ == '__main__':
         data = load_data(f'/run/media/matz/SD 32GB/VideoChopper/out_{i + 1}_*.npy')
         label, certainty = classify(model, data)
         name = name_lookup[label]
-        print(f'{name} ({certainty * 100:.1f}%)')
+        print(f'{i+1}: {name} ({certainty * 100:.1f}%)')
