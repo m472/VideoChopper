@@ -172,7 +172,7 @@ def chop(input_filenames: List[str],
          bottom: int,
          video_writer: VideoWriter,
          palette_writer: PaletteWriter,
-         debug: bool = false):
+         debug: bool = False):
     """
     Args:
         :param video_writer: output writer for video data, defaults to ImageWriter
