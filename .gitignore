@@ -102,3 +102,6 @@ ENV/
 
 # output data directory
 out/
+
+# Intellij stuff (I guess)
+.idea/
