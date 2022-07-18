@@ -3,30 +3,35 @@
 
 import os
 import PIL
+import json
 import torch
 import wandb
 import random
-import datetime
 
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet18
 
 from tqdm import tqdm
+from datetime import datetime
 from dataclasses import dataclass, asdict
 
-from typing import List
+from typing import List, Tuple
 
 
 @dataclass
 class Config:
+    epochs: int
     batch_size: int
     encoder_input_size: int
     momentum: float
     temperature: float
     queue_size: int
     feature_dim: int
+
+    train_path: str
+    test_path: str
     
     mean: List[float]
     std: List[float]
@@ -36,21 +41,32 @@ class ImageDataset(Dataset):
     def __init__(self, path: str, transforms):
         super(ImageDataset).__init__()
         self.path = path
-        self.filelist = os.listdir(path)
+        self.filelist = [os.path.join(path, fname) for fname in os.listdir(path)]
         self.transforms = transforms
     
     def __len__(self) -> int:
         return len(self.filelist)
     
-    def __getitem__(self, index: int) -> torch.Tensor:
-        img = PIL.Image.open(os.path.join(self.path, self.filelist[index]))
-        return self.transforms(img)
+    def _getimage(self, index: int) -> torch.Tensor:
+        return PIL.Image.open(self.filelist[index])
     
 
 class PairImageDataset(ImageDataset):
-    def __getitem__(self, index: int) -> torch.Tensor:
-        img = PIL.Image.open(os.path.join(self.path, self.filelist[index]))
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        img = self._getimage(index)
         return (self.transforms(img), self.transforms(img))
+
+
+class LabeledImageDataset(ImageDataset):
+    def __init__(self, path: str, transforms):
+        super().__init__(path, transforms)
+        self.classes = os.listdir(path)
+        self.filelist, self.labels = zip(*[(os.path.join(path, d, f), l) for l, d in enumerate(self.classes)
+                                     for f in os.listdir(os.path.join(path, d))])
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+        img = self._getimage(index)
+        return (self.transforms(img), self.labels[index])
 
 
 class Encoder(nn.Module):
@@ -155,7 +171,6 @@ class GaussianBlur:
 
 def train(model, dataloader, optimizer, epochs):
     for e in range(epochs):
-        wandb.log({'epoch': e})
         total_num, total_loss = 0, 0
         train_bar = tqdm(dataloader)
         for A, B in train_bar:
@@ -169,24 +184,11 @@ def train(model, dataloader, optimizer, epochs):
 
             total_num += dataloader.batch_size
             total_loss += loss.item() * dataloader.batch_size
-            wandb.log({'loss': total_loss / total_num})
             train_bar.set_description(f'train epoch: [{e}/{epochs}], loss: {total_loss / total_num:.3f}')
+        wandb.log({'epoch': e, 'loss': total_loss / total_num})
 
 
-if __name__ == "__main__":
-    wandb.init()
-    config = Config(batch_size=64, 
-                    encoder_input_size=64,
-                    queue_size=1024,
-                    momentum=0.99,
-                    temperature=0.1,
-                    feature_dim=32,
-                    mean=[0.5432602 , 0.5414511 , 0.56252354], 
-                    std=[0.13111968, 0.1271442 , 0.13114768])
-    wandb.config.update(asdict(config))
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
+def create_datasets(config: Config) -> Tuple[DataLoader, DataLoader]:
     train_transforms = transforms.Compose([
         transforms.RandomResizedCrop(config.encoder_input_size, scale=(0.2, 1)),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.05)], p=0.7),
@@ -197,7 +199,7 @@ if __name__ == "__main__":
         transforms.Normalize(config.mean, config.std),
     ])
 
-    train_dataset = PairImageDataset('/home/matz/Documents/VideoChopper/out/train/', train_transforms)
+    train_dataset = PairImageDataset(config.train_path, train_transforms)
 
     test_transforms = transforms.Compose([
         transforms.Resize((config.encoder_input_size, config.encoder_input_size)),
@@ -205,10 +207,37 @@ if __name__ == "__main__":
         transforms.Normalize(config.mean, config.std),
     ])
 
-    test_dataset = ImageDataset('/home/matz/Documents/VideoChopper/out/test/', test_transforms)
+    test_dataset = LabeledImageDataset(config.test_path, test_transforms)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=4)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, 
+                              batch_size=config.batch_size, 
+                              shuffle=True, 
+                              drop_last=True, 
+                              num_workers=4)
+
+    test_loader = DataLoader(test_dataset, 
+                             batch_size=config.batch_size, 
+                             shuffle=False, 
+                             num_workers=4)
+
+    return train_loader, test_loader
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument('--config', default='conf.json', type=str, help='path to the configuration file')
+    parser.add_argument('--model-output-dir', default='models', type=str, help='path to put the trained models')
+    args = parser.parse_args()
+
+    wandb.init()
+
+    with open(args.config) as f:
+        config = Config(**json.load(f))
+
+    wandb.config.update(asdict(config))
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     model = MoCo(queue_size=config.queue_size, 
                  momentum=config.momentum, 
@@ -216,7 +245,13 @@ if __name__ == "__main__":
                  feature_dim=config.feature_dim).to(device)
     wandb.watch(model)
 
-    optimizer = torch.optim.Adam(model.parameters())
-    train(model, train_loader, optimizer, epochs=10)
+    train_loader, test_loader = create_datasets(config)
 
-    torch.save({'state_dict': model.state_dict}, f'models/model_{datetime.today().strftime("%Y%m%d_%H%M")}')
+    optimizer = torch.optim.Adam(model.parameters())
+    train(model, train_loader, optimizer, epochs=config.epochs)
+
+    os.makedirs(args.model_output_dir, exist_ok=True)
+    torch.save({'state_dict_query': model.state_dict()}, 
+               os.path.join(args.model_output_dir, 
+                           f'model_{datetime.today().strftime("%Y%m%d_%H%M")}'))
+
