@@ -105,3 +105,6 @@ out/
 
 # Intellij stuff (I guess)
 .idea/
+
+# wandb logging stuff
+wandb/
